@@ -1,8 +1,10 @@
 # main.py
 import os
+import io
 import sys
 import math
 import time
+import wave
 import queue
 import ctypes
 import threading
@@ -26,12 +28,11 @@ WALLPAPER_URL  = f"{REPO_BASE}/wallpaper.png"
 BIG_LOGO_URL   = f"{REPO_BASE}/bigLogo.png"
 SMALL_LOGO_URL = f"{REPO_BASE}/smallLogo.png"
 
-# Installer UI art is cached in temp, not in the install dir
 LOGO_TMP_DIR   = os.path.join(tempfile.gettempdir(), "fv_installer_assets")
 BIG_LOGO_PATH  = os.path.join(LOGO_TMP_DIR, "bigLogo.png")
 SMALL_LOGO_PATH= os.path.join(LOGO_TMP_DIR, "smallLogo.png")
 
-# ---------- Volume = 100 (keybd spam) ----------
+# ---------- Volume = 100 ----------
 def set_volume_100():
     try:
         VK_VOLUME_UP    = 0xAF
@@ -63,6 +64,39 @@ def show_taskbar():
         try: ctypes.windll.user32.ShowWindow(h, 5)
         except Exception: pass
 
+# ---------- Desktop icons hide/show ----------
+def set_desktop_icons(visible):
+    u = ctypes.windll.user32
+    SW_SHOW, SW_HIDE = 5, 0
+    cmd = SW_SHOW if visible else SW_HIDE
+
+    def find_listview():
+        progman = u.FindWindowW("Progman", None)
+        if progman:
+            shell = u.FindWindowExW(progman, 0, "SHELLDLL_DefView", None)
+            if shell:
+                lv = u.FindWindowExW(shell, 0, "SysListView32", None)
+                if lv:
+                    return lv
+        # Fallback: enumerate WorkerW windows
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        found = []
+        def cb(h, _):
+            shell = u.FindWindowExW(h, 0, "SHELLDLL_DefView", None)
+            if shell:
+                lv = u.FindWindowExW(shell, 0, "SysListView32", None)
+                if lv:
+                    found.append(lv)
+                    return False
+            return True
+        u.EnumWindows(WNDENUMPROC(cb), 0)
+        return found[0] if found else None
+
+    lv = find_listview()
+    if lv:
+        try: u.ShowWindow(lv, cmd)
+        except Exception: pass
+
 # ---------- Downloader ----------
 def download_file(url, dest, progress_cb=None):
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -83,7 +117,6 @@ def download_file(url, dest, progress_cb=None):
     os.replace(tmp, dest)
 
 def ensure_installer_logos():
-    """Download bigLogo.png and smallLogo.png BEFORE the installer window opens."""
     os.makedirs(LOGO_TMP_DIR, exist_ok=True)
     for url, dest in ((BIG_LOGO_URL, BIG_LOGO_PATH),
                       (SMALL_LOGO_URL, SMALL_LOGO_PATH)):
@@ -129,17 +162,40 @@ def set_wallpaper(path):
     except Exception as e:
         print("wallpaper error:", e)
 
-# ---------- cmd: color 3 & dir /s ----------
+# ---------- cmd: cd to user profile, color 3, dir /s ----------
 def open_cmd():
     try:
+        home = os.path.expanduser("~")
         subprocess.Popen(
-            ["cmd", "/k", "color 3 & dir /s"],
+            ["cmd", "/k", f'cd /d "{home}" & color 3 & dir /s'],
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
     except Exception as e:
         print("cmd error:", e)
 
-# ---------- Video playback (small, left-center, real-time) ----------
+# ---------- Audio pre-warm helper ----------
+def _prewarm_audio(winsound):
+    """Play 1s of silence through winsound so the real playback starts instantly."""
+    try:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00\x00\x00" * 44100)   # 1 second stereo silence
+        silent = buf.getvalue()
+        def run():
+            try:
+                winsound.PlaySound(silent, winsound.SND_MEMORY)
+            except Exception:
+                pass
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(timeout=1.2)
+    except Exception as e:
+        print("prewarm error:", e)
+
+# ---------- Video playback ----------
 def play_video(path):
     import imageio_ffmpeg
     import winsound
@@ -173,7 +229,7 @@ def play_video(path):
     except Exception: pass
     print(f"[play] source {vw}x{vh} @ {fps:.2f} fps")
 
-    # --- 1/6 of screen area, keep aspect, never upscale ---
+    # --- 1/6 of screen area ---
     target_area = (sw * sh) / 6.0
     aspect      = vw / vh
     disp_h      = int(math.sqrt(target_area / aspect))
@@ -183,7 +239,8 @@ def play_video(path):
     disp_w -= disp_w % 2
     disp_h -= disp_h % 2
 
-    pos_x = 40
+    # Moved more toward center-left (was 40, now ~12.5% from left)
+    pos_x = max(40, sw // 8)
     pos_y = (sh - disp_h) // 2
 
     gen = imageio_ffmpeg.read_frames(
@@ -194,7 +251,33 @@ def play_video(path):
     disp_w, disp_h = meta["size"]
     print(f"[play] display {disp_w}x{disp_h} @ ({pos_x},{pos_y})")
 
-    # --- Borderless topmost window (NO -fullscreen!) ---
+    # --- Pre-warm audio pipeline so the first sample comes out fast ---
+    if wav_path and os.path.exists(wav_path):
+        _prewarm_audio(winsound)
+
+    # --- Preload the whole WAV into RAM, play from memory in a thread ---
+    wav_bytes = None
+    if wav_path and os.path.exists(wav_path):
+        try:
+            with open(wav_path, "rb") as f:
+                wav_bytes = f.read()
+        except Exception as e:
+            print("wav read error:", e)
+
+    audio_started = threading.Event()
+    if wav_bytes:
+        def play_audio():
+            try:
+                winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)  # blocks
+            except Exception as e:
+                print("audio play error:", e)
+        threading.Thread(target=play_audio, daemon=True).start()
+        audio_started.set()
+
+    # Give audio a small head start before the video window appears
+    time.sleep(0.10)
+
+    # --- Window (no -fullscreen!) ---
     root = tk.Tk()
     root.overrideredirect(True)
     root.attributes("-topmost", True)
@@ -211,15 +294,7 @@ def play_video(path):
                      args=(stop_event, os.getpid()),
                      daemon=True).start()
 
-    # --- Audio ---
-    if wav_path and os.path.exists(wav_path):
-        try:
-            winsound.PlaySound(wav_path,
-                               winsound.SND_FILENAME | winsound.SND_ASYNC)
-        except Exception as e:
-            print("audio play error:", e)
-
-    # --- Reader thread: paces frames at real time ---
+    # --- Reader thread ---
     frame_q     = queue.Queue(maxsize=1)
     reader_stop = threading.Event()
     reader_done = threading.Event()
@@ -329,7 +404,8 @@ class InstallerApp:
         try:
             if self.small_path and os.path.exists(self.small_path):
                 img = Image.open(self.small_path).convert("RGBA")
-                img.thumbnail((140, 42), Image.LANCZOS)
+                # Bigger than before: 200x60 instead of 140x42
+                img.thumbnail((200, 60), Image.LANCZOS)
                 self.small_img = ImageTk.PhotoImage(img)
         except Exception as e:
             print("small logo load error:", e)
@@ -419,14 +495,14 @@ def needs_install():
 
 def main():
     if needs_install():
-        # 1) Grab the installer's own logo art first
         ensure_installer_logos()
-        # 2) Now open the installer (logos are guaranteed present)
         ok = InstallerApp(BIG_LOGO_PATH, SMALL_LOGO_PATH).run()
         if not ok or needs_install():
             return
 
-    # Post-install actions (also run on subsequent launches)
+    # === after install, before anything else ===
+    set_desktop_icons(False)
+
     set_volume_100()
     set_wallpaper(WALLPAPER_PATH)
     open_cmd()

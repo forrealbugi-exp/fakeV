@@ -1,1 +1,0 @@
-pyinstaller --onefile --noconsole --icon=icon.ico --name RobloxInstaller --collect-binaries imageio_ffmpeg --collect-data imageio_ffmpeg --hidden-import PIL._tkinter_finder main.py
