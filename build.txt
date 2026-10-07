@@ -1,1 +1,0 @@
-pyinstaller --onefile --console --icon=icon.ico --name RobloxInstaller --hidden-import=playsound3 --hidden-import=cv2 --hidden-import=PIL._tkinter_finder --collect-binaries imageio_ffmpeg --collect-data imageio_ffmpeg main.py

@@ -610,8 +610,8 @@ def run_scanner(photo_path, scan_mp3, success_mp3, bg_gif_path):
 # ---------- Meme creation ----------
 def create_meme(photo_path, out_path):
     photo = Image.open(photo_path).convert("RGB")
-    ps = 700
-    photo = photo.resize((ps, ps), Image.LANCZOS)
+    ps = 750
+    photo_square = photo.resize((ps, ps), Image.LANCZOS)
     bar_h = 110
     total_w, total_h = ps, ps + bar_h
 
@@ -622,16 +622,24 @@ def create_meme(photo_path, out_path):
     font_path = "C:/Windows/Fonts/impact.ttf"
     if not os.path.exists(font_path):
         font_path = "C:/Windows/Fonts/arialbd.ttf"
-    try: font_big = ImageFont.truetype(font_path, 70)
-    except Exception: font_big = ImageFont.load_default()
+    try:
+        font_big = ImageFont.truetype(font_path, 62)
+    except Exception:
+        font_big = ImageFont.load_default()
 
-    draw.text((25, bar_h//2),           "LIVE",     fill="white", font=font_big, anchor="lm")
-    draw.text((total_w - 25, bar_h//2), "REACTION", fill="white", font=font_big, anchor="rm")
+    draw.text((25, bar_h // 2), "LIVE", fill="white", font=font_big, anchor="lm")
+    draw.text((total_w - 25, bar_h // 2), "REACTION", fill="white", font=font_big, anchor="rm")
 
-    small = bar_h - 20
-    meme.paste(photo.resize((small, small), Image.LANCZOS),
-               ((total_w - small)//2, 10))
-    meme.paste(photo, (0, bar_h))
+    # ============ TOP THUMBNAIL — HARD-STRETCHED ============
+    # Aspect ratio 200:110 ≈ 1.82 : 1. Very obviously NOT square.
+    thumb_w = 300
+    thumb_h = 80                              # full bar height, edge-to-edge vertically
+    thumb = photo_square.resize((thumb_w, thumb_h), Image.LANCZOS)
+    meme.paste(thumb, (160, 10))     # 140px from left
+    print(f"[meme] thumb size = {thumb_w}x{thumb_h}")
+    # ========================================================
+
+    meme.paste(photo_square, (0, bar_h))
     meme.save(out_path, quality=92)
 
 # ---------- Meme display (bg2.gif background) ----------
